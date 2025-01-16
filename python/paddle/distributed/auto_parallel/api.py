@@ -1175,6 +1175,7 @@ class _ShardOptimizer(Optimizer):
             tgt_mesh = self.params_to_reshard_mesh_shape[param.name][1]
             tgt_placements = [param.placements[0]] * tgt_mesh.ndim
             param = dist.reshard(param, tgt_mesh, tgt_placements)
+            param.name = param_name
 
         if param_name in self._inner_opt._master_weights.keys():
             master_weight = self._inner_opt._master_weights[param.name]
@@ -1256,8 +1257,6 @@ class _ShardOptimizer(Optimizer):
         if isinstance(parameters, dict):
             parameters = parameters.get('params')
 
-        print("==== block in create accumulators ====")
-        print(block.program)
         # NOTE(zhiqiu): we need to create and shard accumulators for parameters one by one,
         # to avoid OOM caused by replcated accumulators.
         for p in parameters:

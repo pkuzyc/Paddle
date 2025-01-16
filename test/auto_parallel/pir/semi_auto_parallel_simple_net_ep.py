@@ -21,6 +21,7 @@ import paddle
 import paddle.distributed as dist
 from paddle import nn
 from paddle.io import BatchSampler, DataLoader
+from paddle.static import global_scope
 
 
 class Config:
@@ -383,11 +384,9 @@ class TestSimpleNetForEP:
         dataloader = self.create_data_loader(config)
         optimizer = self.create_optimizer(model)
         if config.sharding_stage == 1:
-            print("before shard optimizer:", optimizer)
             optimizer = dist.shard_optimizer(
                 optimizer, dist.ShardingStage1("d0", config.mesh)
             )
-            print("after shard optimizer:", optimizer)
         criterion = Criterion()
         return model, dataloader, criterion, optimizer
 
@@ -410,10 +409,13 @@ class TestSimpleNetForEP:
             tr_loss = criterion(logits, labels)
 
             tr_loss.backward()
+            print("==== gate.weight ====", model.gate.weight.name)
+            print(model.gate.weight)
             print("==== gate.weight.grad ====")
             print(model.gate.weight.grad)
             optimizer.step()
             optimizer.clear_grad()
+            print(f"step {step}, loss: {tr_loss}")
             losses.append(tr_loss.numpy())
 
         return losses
@@ -545,6 +547,24 @@ class TestSimpleNetForEP:
         )
         dist_model.train()
 
+        print("==== dense program ====")
+        print(dist_model._engine.main_program)
+        ops = dist_model._engine.main_program.global_block().ops
+        dense_program = dist_model._engine.main_program
+        # dist_model._fetch_value(ops[7].result(0), "linear_0.w_0.dist_moment1_0")
+        dist_model._fetch_value(ops[19].result(0), "linear_0.w_0.dist")
+        # dist_model._fetch_value(ops[18].result(0), "expert_weight")
+        # dist_model._fetch_value(ops[17].result(0), "linear_2.w_0.dist")
+
+        val = dense_program.get_value_by_op_id(513)
+        dist_model._fetch_value(val, "share_data_out")
+        val = dense_program.get_value_by_op_id(524)[0]
+        dist_model._fetch_value(val, "adamw_out")
+        val = dense_program.get_value_by_op_id(525)
+        dist_model._fetch_value(val, "allgather_out")
+        val = dense_program.get_value_by_op_id(526)
+        dist_model._fetch_value(val, "assign_out_out")
+        moment2_var = global_scope().find_var("linear_0.w_0.dist_moment2_0")
         loss_list = []
         for batch_id, data in enumerate(dist_dataloader()):
             if isinstance(data, dict):
@@ -567,8 +587,26 @@ class TestSimpleNetForEP:
         config.class_num = 4
         config.sharding_stage = 1
 
-        losses = self.run_all2all_dy2st(config)
-        print(losses)
+        dy_losses = self.run_all2all_dy(config)
+
+        dy2st_losses = self.run_all2all_dy2st(config)
+        paddle.disable_static()
+        pd_loss_dy2st = paddle.to_tensor(dy2st_losses)
+        pd_loss_dy2st = dist.auto_parallel.api.dtensor_from_local(
+            pd_loss_dy2st,
+            config.mesh,
+            [
+                dist.Partial(dist.ReduceType.kRedAvg),
+                dist.Partial(dist.ReduceType.kRedAvg),
+            ],
+        )
+        pd_loss_dy2st = dist.reshard(
+            pd_loss_dy2st, config.mesh, [dist.Replicate()]
+        )
+        # dy2st_loss = pd_loss_dy2st.numpy()
+        print("dy_losses:", dy_losses)
+        print("ori_dy2st_losses:", dy2st_losses)
+        print("dy2st_losses:", pd_loss_dy2st)
 
     def run_test_case(self):
         # self.test_ep_demo_net()
